@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 
 # Page config
@@ -21,6 +21,12 @@ if "messages" not in st.session_state:
 
 if "booking_confirmed" not in st.session_state:
     st.session_state.booking_confirmed = False
+
+if "awaiting_confirmation" not in st.session_state:
+    st.session_state.awaiting_confirmation = False
+
+if "selected_slot" not in st.session_state:
+    st.session_state.selected_slot = None
 
 # Custom CSS for better styling
 st.markdown(
@@ -69,13 +75,18 @@ st.markdown(
         margin: 1rem 0;
     }
     
-    .available-slots {
-        background-color: #e3f2fd;
-        border: 1px solid #bbdefb;
-        color: #0d47a1;
+    .quick-phrases {
+        background-color: #471396;
+        border: 1px solid #ffeaa7;
+        color: #DCD7C9;
         padding: 1rem;
         border-radius: 5px;
         margin: 1rem 0;
+    }
+    
+    .stButton > button {
+        width: 100%;
+        margin: 0.2rem 0;
     }
 </style>
 """,
@@ -93,6 +104,7 @@ def send_message_to_api(message: str) -> dict:
                 "conversation_id": st.session_state.conversation_id,
             },
             headers={"Content-Type": "application/json"},
+            timeout=30,
         )
         response.raise_for_status()
         return response.json()
@@ -104,12 +116,35 @@ def send_message_to_api(message: str) -> dict:
 def get_appointments():
     """Get all appointments from the API"""
     try:
-        response = requests.get(f"{API_BASE_URL}/appointments")
+        response = requests.get(f"{API_BASE_URL}/appointments", timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching appointments: {str(e)}")
         return None
+
+
+def send_predefined_message(message: str):
+    """Send a predefined message and handle the response"""
+    st.session_state.messages.append({"role": "user", "content": message})
+
+    with st.spinner("🤔 Processing your request..."):
+        api_response = send_message_to_api(message)
+
+    if api_response:
+        st.session_state.messages.append(
+            {"role": "assistant", "content": api_response["response"]}
+        )
+
+        # Check if slots are available for selection
+        if api_response.get("available_slots"):
+            st.session_state.awaiting_confirmation = True
+
+        if api_response.get("booking_confirmed"):
+            st.session_state.booking_confirmed = True
+            st.session_state.awaiting_confirmation = False
+
+        st.rerun()
 
 
 # Main app layout
@@ -124,72 +159,160 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.markdown("### 💬 Chat with the Booking Assistant")
 
-    # Chat interface
-    with st.container():
-        # Display conversation history
-        if st.session_state.messages:
-            st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-            for i, message in enumerate(st.session_state.messages):
-                if message["role"] == "user":
-                    st.markdown(
-                        f'<div class="user-message">{message["content"]}</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div class="ai-message">{message["content"]}</div>',
-                        unsafe_allow_html=True,
-                    )
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.info(
-                "👋 Welcome! I'm your AI booking assistant. You can say things like:\n"
-                "- 'I'd like to book a meeting tomorrow afternoon'\n"
-                "- 'What slots are available next week?'\n"
-                "- 'Schedule a consultation for Monday morning'"
-            )
+    # Display conversation history
+    if st.session_state.messages:
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        for message in st.session_state.messages:
+            if message["role"] == "user":
+                st.markdown(
+                    f'<div class="user-message">{message["content"]}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="ai-message">{message["content"]}</div>',
+                    unsafe_allow_html=True,
+                )
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.info(
+            "👋 Welcome! I'm your AI booking assistant. Use the quick phrases below to get started!"
+        )
 
-    # Chat input
+    # Quick Phrases Section
+    st.markdown(
+        """
+    <div class="quick-phrases">
+        <h4>🎯 Quick Phrases - Click the buttons below instead of typing:</h4>
+        <p>These phrases work best with the booking system!</p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    # Quick phrase buttons in columns
+    phrase_col1, phrase_col2 = st.columns(2)
+
+    with phrase_col1:
+        st.markdown("**📅 Booking Requests:**")
+        if st.button("📝 Book a meeting tomorrow"):
+            send_predefined_message("book a meeting tomorrow")
+
+        if st.button("📞 Schedule a call tomorrow"):
+            send_predefined_message("schedule a call tomorrow")
+
+        if st.button("🤝 Book appointment tomorrow"):
+            send_predefined_message("book appointment tomorrow")
+
+        if st.button("📅 Book meeting next week"):
+            send_predefined_message("book meeting next week")
+
+    with phrase_col2:
+        st.markdown("**🔍 Availability Checks:**")
+        if st.button("⏰ What slots are available tomorrow"):
+            send_predefined_message("what slots are available tomorrow")
+
+        if st.button("📋 Check availability next week"):
+            send_predefined_message("check availability next week")
+
+        if st.button("🗓️ Show me free times"):
+            send_predefined_message("show me available slots")
+
+        if st.button("⌚ What times are free"):
+            send_predefined_message("what times are available")
+
+    # Time-specific booking buttons
+    st.markdown("**🕐 Specific Time Requests:**")
+    time_col1, time_col2, time_col3 = st.columns(3)
+
+    with time_col1:
+        if st.button("🌅 Book meeting tomorrow morning"):
+            send_predefined_message("book meeting tomorrow morning")
+
+        if st.button("🌞 Book meeting tomorrow afternoon"):
+            send_predefined_message("book meeting tomorrow afternoon")
+
+    with time_col2:
+        if st.button("🕙 Book meeting tomorrow at 10 am"):
+            send_predefined_message("book meeting tomorrow at 10 am")
+
+        if st.button("🕐 Book meeting tomorrow at 2 pm"):
+            send_predefined_message("book meeting tomorrow at 2 pm")
+
+    with time_col3:
+        if st.button("📅 Book meeting monday"):
+            send_predefined_message("book meeting monday")
+
+        if st.button("📅 Book meeting friday"):
+            send_predefined_message("book meeting friday")
+
+    # Slot selection buttons (show when awaiting confirmation)
+    if st.session_state.awaiting_confirmation:
+        st.markdown("**✅ Confirm Your Selection:**")
+        confirm_col1, confirm_col2, confirm_col3, confirm_col4 = st.columns(4)
+
+        with confirm_col1:
+            if st.button("✅ Select slot 1"):
+                send_predefined_message("1")
+
+        with confirm_col2:
+            if st.button("✅ Select slot 2"):
+                send_predefined_message("2")
+
+        with confirm_col3:
+            if st.button("✅ Select slot 3"):
+                send_predefined_message("3")
+
+        with confirm_col4:
+            if st.button("✅ Select slot 4"):
+                send_predefined_message("4")
+
+        # Additional confirmation phrases
+        st.markdown("**Or use these confirmation phrases:**")
+        confirm_row1, confirm_row2 = st.columns(2)
+
+        with confirm_row1:
+            if st.button("✅ Yes, confirm booking"):
+                send_predefined_message("yes confirm booking")
+
+            if st.button("✅ That works for me"):
+                send_predefined_message("that works")
+
+        with confirm_row2:
+            if st.button("✅ Sounds good"):
+                send_predefined_message("sounds good")
+
+            if st.button("✅ Confirm"):
+                send_predefined_message("confirm")
+
+    # Manual input (kept as backup)
+    st.markdown("---")
+    st.markdown("**💬 Or type manually (use phrases similar to buttons above):**")
+
     with st.form("chat_form", clear_on_submit=True):
         user_input = st.text_input(
             "Type your message here...",
-            placeholder="e.g., I'd like to book a meeting tomorrow at 2 PM",
+            placeholder="e.g., book meeting tomorrow or check availability next week",
             key="user_input",
         )
         send_button = st.form_submit_button("Send 📤")
 
         if send_button and user_input.strip():
-            # Add user message to session state
-            st.session_state.messages.append({"role": "user", "content": user_input})
-
-            # Send to API
-            with st.spinner("🤔 Processing your request..."):
-                api_response = send_message_to_api(user_input)
-
-            if api_response:
-                # Add AI response to session state
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": api_response["response"]}
-                )
-
-                # Update booking status
-                if api_response.get("booking_confirmed"):
-                    st.session_state.booking_confirmed = True
-
-                # Rerun to update the display
-                st.rerun()
+            send_predefined_message(user_input)
 
     # Show booking confirmation
     if st.session_state.booking_confirmed:
         st.markdown(
             """
-        <div class="booking-success">
-            <h4>✅ Booking Confirmed!</h4>
-            <p>Your appointment has been successfully booked. Check the appointments panel for details.</p>
-        </div>
-        """,
+    <div class="booking-success">
+        <h4>✅ Booking Confirmed!</h4>
+        <p>Your appointment has been successfully booked. Check the appointments panel for details.</p>
+    </div>
+    """,
             unsafe_allow_html=True,
         )
+        st.session_state.booking_confirmed = False  # Reset after display
+        st.rerun()  # 👈 force refresh so new appointment appears
 
 with col2:
     st.markdown("### 📅 Current Appointments")
@@ -205,53 +328,31 @@ with col2:
 
         for apt in appointments:
             with st.expander(f"📋 {apt['title']}", expanded=False):
-                start_time = datetime.fromisoformat(apt["start"].replace("Z", "+00:00"))
-                end_time = datetime.fromisoformat(apt["end"].replace("Z", "+00:00"))
+                try:
+                    if isinstance(apt["start"], str):
+                        start_time = datetime.fromisoformat(
+                            apt["start"].replace("Z", "+00:00")
+                        )
+                        end_time = datetime.fromisoformat(
+                            apt["end"].replace("Z", "+00:00")
+                        )
+                    else:
+                        start_time = apt["start"]
+                        end_time = apt["end"]
 
-                st.write(
-                    f"**Start:** {start_time.strftime('%A, %B %d, %Y at %I:%M %p')}"
-                )
-                st.write(f"**End:** {end_time.strftime('%A, %B %d, %Y at %I:%M %p')}")
-                st.write(f"**ID:** {apt['id']}")
+                    st.write(
+                        f"**Start:** {start_time.strftime('%A, %B %d, %Y at %I:%M %p')}"
+                    )
+                    st.write(
+                        f"**End:** {end_time.strftime('%A, %B %d, %Y at %I:%M %p')}"
+                    )
+                    st.write(f"**ID:** {apt['id']}")
+                except Exception as e:
+                    st.write(f"**Start:** {apt['start']}")
+                    st.write(f"**End:** {apt['end']}")
+                    st.write(f"**ID:** {apt['id']}")
     else:
         st.info("No appointments scheduled yet.")
-
-    # Quick actions
-    st.markdown("### ⚡ Quick Actions")
-
-    if st.button("🗓️ Check This Week's Availability"):
-        # Add message to trigger availability check
-        st.session_state.messages.append(
-            {"role": "user", "content": "What slots are available this week?"}
-        )
-
-        with st.spinner("Checking availability..."):
-            api_response = send_message_to_api("What slots are available this week?")
-
-        if api_response:
-            st.session_state.messages.append(
-                {"role": "assistant", "content": api_response["response"]}
-            )
-            st.rerun()
-
-    if st.button("📞 Book Quick Call"):
-        st.session_state.messages.append(
-            {
-                "role": "user",
-                "content": "I'd like to schedule a quick call for tomorrow",
-            }
-        )
-
-        with st.spinner("Finding available slots..."):
-            api_response = send_message_to_api(
-                "I'd like to schedule a quick call for tomorrow"
-            )
-
-        if api_response:
-            st.session_state.messages.append(
-                {"role": "assistant", "content": api_response["response"]}
-            )
-            st.rerun()
 
 # Footer
 st.markdown("---")
@@ -274,19 +375,24 @@ with st.sidebar:
     st.markdown("## 📖 How to Use")
     st.markdown(
         """
-    **Natural Language Examples:**
-    - "Book a meeting tomorrow at 2 PM"
-    - "I need a consultation next week"
-    - "What's available on Monday?"
-    - "Schedule a call for Thursday morning"
-    - "Can we meet Friday afternoon?"
+    **✅ RECOMMENDED - Use Quick Phrase Buttons:**
+    - Click the buttons instead of typing
+    - These phrases work best with the AI
+    - Covers all booking scenarios
     
-    **Features:**
-    - 🗣️ Natural conversation
-    - 📅 Real-time availability check
-    - ⏰ Smart time slot suggestions
-    - ✅ Instant booking confirmation
-    - 📱 Mobile-friendly interface
+    **🎯 Proven Working Phrases:**
+    - "book meeting tomorrow"
+    - "schedule call tomorrow" 
+    - "check availability next week"
+    - "what slots are available"
+    - Numbers: "1", "2", "3", "4" for slot selection
+    - "confirm", "yes", "sounds good"
+    
+    **⚠️ Avoid Complex Language:**
+    - Don't use: "I would like to schedule..."
+    - Use: "book meeting tomorrow"
+    - Don't use: "Can we meet on..."
+    - Use: "book meeting monday"
     """
     )
 
@@ -303,12 +409,27 @@ with st.sidebar:
     except:
         st.error("❌ API Offline")
 
+    st.markdown("---")
+    st.markdown("## 🎯 Booking Tips")
     st.markdown(
-        f"**Backend:** FastAPI  \n**Agent:** LangGraph  \n**Frontend:** Streamlit"
+        """
+    **Step 1:** Click a booking button  
+    **Step 2:** Wait for available slots  
+    **Step 3:** Click slot number (1, 2, 3, 4)  
+    **Step 4:** Confirm with "yes" or "confirm"
+    
+    **Most reliable phrases:**
+    - book meeting tomorrow
+    - check availability tomorrow  
+    - 1 (for first slot)
+    - confirm
+    """
     )
 
     if st.button("🔄 Reset Conversation"):
         st.session_state.conversation_id = str(uuid.uuid4())
         st.session_state.messages = []
         st.session_state.booking_confirmed = False
+        st.session_state.awaiting_confirmation = False
+        st.session_state.selected_slot = None
         st.rerun()

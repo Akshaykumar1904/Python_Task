@@ -34,13 +34,19 @@ class MockCalendar:
         current = start_date
 
         while current < end_date:
-            if 9 <= current.hour < 17:
+            # Only business hours (9 AM to 5 PM)
+            if 9 <= current.hour < 17 and current.weekday() < 5:  # Monday to Friday
                 slot_end = current + timedelta(hours=1)
                 conflict = False
+
+                # Check for conflicts with existing appointments
                 for apt in self.appointments:
-                    if current < apt["end"] and slot_end > apt["start"]:
+                    apt_start = apt["start"]
+                    apt_end = apt["end"]
+                    if current < apt_end and slot_end > apt_start:
                         conflict = True
                         break
+
                 if not conflict:
                     available_slots.append(
                         {
@@ -51,7 +57,7 @@ class MockCalendar:
                     )
             current += timedelta(hours=1)
 
-        return available_slots[:10]
+        return available_slots[:10]  # Return max 10 slots
 
     def book_appointment(
         self, title: str, start: datetime, duration_hours: int = 1
@@ -80,52 +86,65 @@ class ConversationState(TypedDict):
 
 class ChatMessage(BaseModel):
     message: str
-    available_slots: List[Dict] = []
-    booking_confirmed: bool = False
     conversation_id: str
 
 
 class ChatResponse(BaseModel):
-    message: str
+    response: str
     available_slots: List[Dict] = []
     booking_confirmed: bool = False
     conversation_id: str
 
 
 def extract_date_time_info(text: str) -> Dict[str, Any]:
+    """Extract date and time information from text"""
     info = {}
-    date_patterns = [
-        r"tomorrow",
-        r"next week",
-        r"monday",
-        r"tuesday",
-        r"wednesday",
-        r"thursday",
-        r"friday",
-        r"saturday",
-        r"sunday",
-    ]
-    time_patterns = [
-        r"(\d{1,2})\s*(am|pm)",
-        r"(\d{1,2}):(\d{2})\s*(am|pm)",
-        r"morning",
-        r"afternoon",
-        r"evening",
-    ]
     text_lower = text.lower()
 
-    for pattern in date_patterns:
+    # Date patterns
+    date_patterns = {
+        r"tomorrow": "tomorrow",
+        r"next week": "next_week",
+        r"monday": "monday",
+        r"tuesday": "tuesday",
+        r"wednesday": "wednesday",
+        r"thursday": "thursday",
+        r"friday": "friday",
+        r"saturday": "saturday",
+        r"sunday": "sunday",
+    }
+
+    for pattern, value in date_patterns.items():
         if re.search(pattern, text_lower):
-            info["date_preference"] = pattern
+            info["date_preference"] = value
             break
 
-    for pattern in time_patterns:
+    # Time patterns
+    time_patterns = [
+        (r"(\d{1,2})\s*(am|pm)", "specific_time"),
+        (r"(\d{1,2}):(\d{2})\s*(am|pm)", "specific_time"),
+        (r"morning", "morning"),
+        (r"afternoon", "afternoon"),
+        (r"evening", "evening"),
+    ]
+
+    for pattern, time_type in time_patterns:
         match = re.search(pattern, text_lower)
         if match:
-            info["time_preference"] = match.group()
+            info["time_preference"] = (
+                match.group() if time_type == "specific_time" else time_type
+            )
             break
 
-    purpose_keywords = ["meeting", "consultation", "call", "interview", "demo"]
+    # Purpose keywords
+    purpose_keywords = [
+        "meeting",
+        "consultation",
+        "call",
+        "interview",
+        "demo",
+        "appointment",
+    ]
     for keyword in purpose_keywords:
         if keyword in text_lower:
             info["purpose"] = keyword
@@ -135,153 +154,258 @@ def extract_date_time_info(text: str) -> Dict[str, Any]:
 
 
 def determine_intent(text: str) -> str:
-    text_lower = text.lower()
+    """Determine user intent from text"""
+    text_lower = text.lower().strip()
+
+    # Check for slot selection (numbers)
+    if text_lower in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]:
+        return "select_slot"
+
+    # Check for confirmation
+    if any(
+        word in text_lower
+        for word in ["confirm", "yes", "sounds good", "that works", "book it", "ok"]
+    ):
+        return "confirm_booking"
+
+    # Check for booking request
     if any(
         word in text_lower for word in ["book", "schedule", "appointment", "meeting"]
     ):
         return "book_appointment"
-    elif any(word in text_lower for word in ["available", "free", "slots", "times"]):
-        return "check_availability"
-    elif any(
-        word in text_lower for word in ["confirm", "yes", "that works", "sounds good"]
+
+    # Check for availability
+    if any(
+        word in text_lower
+        for word in ["available", "free", "slots", "times", "check availability"]
     ):
-        return "confirm_booking"
-    elif any(word in text_lower for word in ["cancel", "change", "reschedule"]):
+        return "check_availability"
+
+    # Check for cancellation/modification
+    if any(word in text_lower for word in ["cancel", "change", "reschedule"]):
         return "modify_booking"
-    else:
-        return "general_inquiry"
+
+    return "general_inquiry"
 
 
 def get_date_range_from_preference(preference: str) -> tuple:
+    """Get date range based on user preference"""
     now = datetime.now()
-    if "tomorrow" in preference:
-        start = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
-            days=1
+
+    if preference == "tomorrow":
+        start = (now + timedelta(days=1)).replace(
+            hour=9, minute=0, second=0, microsecond=0
         )
-        end = start + timedelta(hours=8)
-    elif "next week" in preference:
+        end = start.replace(hour=17)
+    elif preference == "next_week":
         days_ahead = 7 - now.weekday()
-        start = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
-            days=days_ahead
+        start = (now + timedelta(days=days_ahead)).replace(
+            hour=9, minute=0, second=0, microsecond=0
         )
-        end = start + timedelta(days=5, hours=8)
+        end = start + timedelta(days=4, hours=8)  # Mon-Fri
+    elif preference in [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]:
+        weekdays = [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ]
+        target_weekday = weekdays.index(preference)
+        days_ahead = target_weekday - now.weekday()
+        if days_ahead <= 0:  # Target day already happened this week
+            days_ahead += 7
+        start = (now + timedelta(days=days_ahead)).replace(
+            hour=9, minute=0, second=0, microsecond=0
+        )
+        end = start.replace(hour=17)
     else:
-        start = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
-            days=1
+        # Default: next business day
+        start = (now + timedelta(days=1)).replace(
+            hour=9, minute=0, second=0, microsecond=0
         )
-        end = start + timedelta(days=3, hours=8)
+        end = start + timedelta(days=2, hours=8)
+
     return start, end
 
 
 def analyze_input(state: ConversationState) -> ConversationState:
+    """Analyze user input and extract intent and information"""
     last_message = state["messages"][-1].content
     intent = determine_intent(last_message)
     extracted_info = extract_date_time_info(last_message)
+
     state["user_intent"] = intent
     state["extracted_info"] = {**state.get("extracted_info", {}), **extracted_info}
+
     return state
 
 
-def check_availablity(state: ConversationState) -> ConversationState:
+def check_availability(state: ConversationState) -> ConversationState:
+    """Check available time slots"""
     extracted_info = state["extracted_info"]
+
     if "date_preference" in extracted_info:
         start_date, end_date = get_date_range_from_preference(
             extracted_info["date_preference"]
         )
     else:
+        # Default to tomorrow
         now = datetime.now()
-        start_date = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(
-            days=1
+        start_date = (now + timedelta(days=1)).replace(
+            hour=9, minute=0, second=0, microsecond=0
         )
-        end_date = start_date + timedelta(days=3, hours=8)
+        end_date = start_date.replace(hour=17)
+
     available_slots = calendar.get_availability(start_date, end_date)
     state["available_slots"] = available_slots
+
+    return state
+
+
+def handle_slot_selection(state: ConversationState) -> ConversationState:
+    """Handle user's slot selection"""
+    last_message = state["messages"][-1].content.strip()
+    available_slots = state.get("available_slots", [])
+
+    # Handle numeric selection
+    try:
+        slot_number = int(last_message)
+        if 1 <= slot_number <= len(available_slots):
+            state["selected_slot"] = available_slots[slot_number - 1]
+            state["user_intent"] = "confirm_booking"
+    except ValueError:
+        pass
+
+    return state
+
+
+def confirm_booking(state: ConversationState) -> ConversationState:
+    selected_slot = state.get("selected_slot")
+    extracted_info = state.get("extracted_info", {})
+
+    if selected_slot:
+        purpose = extracted_info.get("purpose", "meeting")
+        title = f"Scheduled {purpose.title()}"
+        appointment = calendar.book_appointment(title, selected_slot["start"])
+
+        state["booking_confirmed"] = True
+        state["available_slots"] = []  # Reset slots after booking
+        state["selected_slot"] = None  # Clear selected slot
+        state["user_intent"] = ""  # Reset intent
+
+        response = f"✅ Booking confirmed! Your {purpose} is scheduled for {selected_slot['formatted']}. Appointment ID: {appointment['id']}"
+        state["messages"].append(AIMessage(content=response))
+
     return state
 
 
 def generate_response(state: ConversationState) -> ConversationState:
+    """Generate appropriate response based on intent and state"""
     intent = state["user_intent"]
     available_slots = state.get("available_slots", [])
     extracted_info = state.get("extracted_info", {})
+    selected_slot = state.get("selected_slot")
 
     if intent == "book_appointment":
         if available_slots:
-            response = "I found some available time for you:\n\n"
+            response = "I found some available time slots for you:\n\n"
             for i, slot in enumerate(available_slots, 1):
                 response += f"{i}. {slot['formatted']}\n"
-            response += "\nWhich slot would you prefer? Let me know the number and your preference!"
+            response += "\nPlease reply with the number of your preferred slot (e.g., '1' for the first slot)."
         else:
-            response = "I'm looking for available time slots. Could you tell me your preferred date and time?"
+            response = "Let me check availability for you. Please specify your preferred date and time."
+
     elif intent == "check_availability":
         if available_slots:
             response = "Here are the available time slots:\n\n"
             for i, slot in enumerate(available_slots, 1):
                 response += f"{i}. {slot['formatted']}\n"
-            response += "\nWould you like to book any of these slots?"
+            response += "\nWould you like to book any of these slots? Just reply with the number!"
         else:
-            response = "Let me check availability for you. What date and time would you prefer?"
+            response = (
+                "Let me check what times are available. What date would you prefer?"
+            )
+
+    elif intent == "select_slot":
+        if selected_slot:
+            response = f"Great! You've selected: {selected_slot['formatted']}\n\nWould you like to confirm this booking? Reply with 'confirm' or 'yes'."
+        else:
+            response = "I didn't find that slot. Please choose a number from the available options above."
+
+    elif intent == "confirm_booking":
+        # This will be handled by confirm_booking function
+        return state
+
     else:
-        response = "I'm here to help with bookings. How can I assist you?"
+        response = "Hello! I'm here to help you book appointments. You can say things like:\n- 'book meeting tomorrow'\n- 'check availability next week'\n- 'schedule call monday'"
 
     state["messages"].append(AIMessage(content=response))
     return state
 
 
-def handler_slot_selection(state: ConversationState) -> ConversationState:
-    """handle user's slot selection"""
-    last_message = state["messages"][-1].content.lower()
-    available_slots = state.get("available_slots", [])
-
-    for i in range(1, min(11, len(available_slots) + 1)):
-        if str(i) in last_message:
-            state["selected_slot"] = available_slots[i - 1]
-            state["user_intent"] = "confirm_booking"
-            break
-
-    return state
-
-
 def create_booking_workflow():
+    """Create the booking workflow"""
     workflow = StateGraph(ConversationState)
 
-    # add nodes
+    # Add nodes
     workflow.add_node("analyze", analyze_input)
-    workflow.add_node("check_availablity", check_availablity)
-    workflow.add_node("handle_selection", handler_slot_selection)
+    workflow.add_node("check_availability", check_availability)
+    workflow.add_node("handle_selection", handle_slot_selection)
     workflow.add_node("respond", generate_response)
+    workflow.add_node("confirm_booking", confirm_booking)
 
+    # Set entry point
     workflow.set_entry_point("analyze")
 
-    def should_check_availblity(state):
+    def should_check_availability(state):
         intent = state["user_intent"]
-        return (
-            "check_availablity"
-            if intent in ["book_appointment", "check_availability"]
-            else "handle_selection"
-        )
+        if intent in ["book_appointment", "check_availability"]:
+            return "check_availability"
+        elif intent == "select_slot":
+            return "handle_selection"
+        elif intent == "confirm_booking":
+            return "confirm_booking"
+        else:
+            return "respond"
 
-    def should_handle_selection(state):
-        intent = state["user_intent"]
-        available_slots = state.get("available_slots", [])
-        return (
-            "handle_selection"
-            if intent == "general_inquiry" and available_slots
-            else "respond"
-        )
+    def after_availability_check(state):
+        return "respond"
 
-    workflow.add_conditional_edges("analyze", should_check_availblity)
-    workflow.add_edge("check_availablity", "respond")
-    workflow.add_conditional_edges("handle_selection", should_handle_selection)
+    def after_slot_selection(state):
+        return "respond"
+
+    def after_booking_confirmation(state):
+        return END
+
+    # Add conditional edges
+    workflow.add_conditional_edges("analyze", should_check_availability)
+    workflow.add_edge("check_availability", "respond")
+    workflow.add_edge("handle_selection", "respond")
+    workflow.add_edge("confirm_booking", END)
     workflow.add_edge("respond", END)
 
     return workflow.compile()
 
 
+# Create the booking agent
 booking_agent = create_booking_workflow()
 
+# Store conversations
 conversations: Dict[str, ConversationState] = {}
 
-app = FastAPI(title="Calendar Booking App Agent")
+# Create FastAPI app
+app = FastAPI(title="Calendar Booking Agent API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -293,9 +417,10 @@ app.add_middleware(
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endPoint(message: ChatMessage):
+async def chat_endpoint(message: ChatMessage):
     """Main chat endpoint"""
     try:
+        # Initialize conversation if not exists
         if message.conversation_id not in conversations:
             conversations[message.conversation_id] = {
                 "messages": [],
@@ -306,14 +431,24 @@ async def chat_endPoint(message: ChatMessage):
                 "booking_confirmed": False,
             }
 
+        # Get current state
         state = conversations[message.conversation_id]
+
+        # Add user message to state
         state["messages"].append(HumanMessage(content=message.message))
 
+        # Process through workflow
         result = await asyncio.to_thread(booking_agent.invoke, state)
 
+        # Update conversation state
         conversations[message.conversation_id] = result
 
-        ai_response = result["messages"][-1].content
+        # Get AI response
+        ai_response = (
+            result["messages"][-1].content
+            if result["messages"]
+            else "I'm ready to help you book an appointment!"
+        )
 
         return ChatResponse(
             response=ai_response,
@@ -323,21 +458,50 @@ async def chat_endPoint(message: ChatMessage):
         )
 
     except Exception as e:
+        print(f"Error in chat endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    """Health check endpoint"""
+    return {"status": "healthy", "message": "Calendar booking API is running"}
 
 
 @app.get("/appointments")
 async def get_appointments():
     """Get all booked appointments"""
-    return {"appointments": calendar.appointments}
+    # Convert datetime objects to ISO format for JSON serialization
+    appointments_json = []
+    for apt in calendar.appointments:
+        apt_copy = apt.copy()
+        if isinstance(apt_copy["start"], datetime):
+            apt_copy["start"] = apt_copy["start"].isoformat()
+        if isinstance(apt_copy["end"], datetime):
+            apt_copy["end"] = apt_copy["end"].isoformat()
+        appointments_json.append(apt_copy)
+
+    return {"appointments": appointments_json}
+
+
+@app.delete("/appointments/{appointment_id}")
+async def cancel_appointment(appointment_id: str):
+    """Cancel an appointment"""
+    for i, apt in enumerate(calendar.appointments):
+        if apt["id"] == appointment_id:
+            removed = calendar.appointments.pop(i)
+            return {
+                "message": f"Appointment {appointment_id} cancelled",
+                "appointment": removed,
+            }
+
+    raise HTTPException(status_code=404, detail="Appointment not found")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("Starting Calendar Booking API...")
+    print("API will be available at: http://localhost:8000")
+    print("Docs available at: http://localhost:8000/docs")
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
