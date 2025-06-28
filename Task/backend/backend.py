@@ -50,9 +50,11 @@ class MockCalendar:
                 if not conflict:
                     available_slots.append(
                         {
-                            "start": current,
-                            "end": slot_end,
+                            "start": current.isoformat(),  # Convert to ISO string immediately
+                            "end": slot_end.isoformat(),   # Convert to ISO string immediately
                             "formatted": current.strftime("%A, %B %d at %I:%M %p"),
+                            "_datetime_start": current,    # Keep datetime for internal use
+                            "_datetime_end": slot_end,     # Keep datetime for internal use
                         }
                     )
             current += timedelta(hours=1)
@@ -82,6 +84,7 @@ class ConversationState(TypedDict):
     available_slots: List[Dict]
     selected_slot: Optional[Dict]
     booking_confirmed: bool
+    conversation_phase: str  # Added to track conversation phase
 
 
 class ChatMessage(BaseModel):
@@ -153,16 +156,18 @@ def extract_date_time_info(text: str) -> Dict[str, Any]:
     return info
 
 
-def determine_intent(text: str) -> str:
-    """Determine user intent from text"""
+def determine_intent(text: str, conversation_phase: str = "") -> str:
+    """Determine user intent from text with context"""
     text_lower = text.lower().strip()
 
-    # Check for slot selection (numbers)
-    if text_lower in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]:
+    print(f"DEBUG: Determining intent for: '{text_lower}', phase: '{conversation_phase}'")
+
+    # Check for slot selection (numbers) - only if we're in slot selection phase
+    if conversation_phase == "awaiting_slot_selection" and text_lower in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]:
         return "select_slot"
 
-    # Check for confirmation
-    if any(
+    # Check for confirmation - prioritize if we have a selected slot
+    if conversation_phase == "awaiting_confirmation" and any(
         word in text_lower
         for word in ["confirm", "yes", "sounds good", "that works", "book it", "ok"]
     ):
@@ -177,7 +182,7 @@ def determine_intent(text: str) -> str:
     # Check for availability
     if any(
         word in text_lower
-        for word in ["available", "free", "slots", "times", "check availability"]
+        for word in ["available", "free", "slots", "times", "check availability", "show me"]
     ):
         return "check_availability"
 
@@ -242,12 +247,16 @@ def get_date_range_from_preference(preference: str) -> tuple:
 def analyze_input(state: ConversationState) -> ConversationState:
     """Analyze user input and extract intent and information"""
     last_message = state["messages"][-1].content
-    intent = determine_intent(last_message)
+    conversation_phase = state.get("conversation_phase", "")
+    
+    intent = determine_intent(last_message, conversation_phase)
     extracted_info = extract_date_time_info(last_message)
 
     state["user_intent"] = intent
     state["extracted_info"] = {**state.get("extracted_info", {}), **extracted_info}
 
+    print(f"DEBUG: Intent determined: {intent}, Phase: {conversation_phase}")
+    
     return state
 
 
@@ -269,7 +278,10 @@ def check_availability(state: ConversationState) -> ConversationState:
 
     available_slots = calendar.get_availability(start_date, end_date)
     state["available_slots"] = available_slots
+    state["conversation_phase"] = "awaiting_slot_selection"  # Set phase
 
+    print(f"DEBUG: Found {len(available_slots)} available slots")
+    
     return state
 
 
@@ -278,33 +290,61 @@ def handle_slot_selection(state: ConversationState) -> ConversationState:
     last_message = state["messages"][-1].content.strip()
     available_slots = state.get("available_slots", [])
 
+    print(f"DEBUG: Handling slot selection: '{last_message}', Available slots: {len(available_slots)}")
+
     # Handle numeric selection
     try:
         slot_number = int(last_message)
         if 1 <= slot_number <= len(available_slots):
-            state["selected_slot"] = available_slots[slot_number - 1]
-            state["user_intent"] = "confirm_booking"
+            selected_slot = available_slots[slot_number - 1].copy()
+            state["selected_slot"] = selected_slot
+            state["conversation_phase"] = "awaiting_confirmation"  # Update phase
+            print(f"DEBUG: Slot {slot_number} selected: {selected_slot['formatted']}")
+        else:
+            print(f"DEBUG: Invalid slot number: {slot_number}")
     except ValueError:
-        pass
+        print(f"DEBUG: Could not parse slot number from: '{last_message}'")
 
     return state
 
 
 def confirm_booking(state: ConversationState) -> ConversationState:
+    """Confirm and create the booking"""
     selected_slot = state.get("selected_slot")
     extracted_info = state.get("extracted_info", {})
+
+    print(f"DEBUG: Confirming booking. Selected slot: {selected_slot}")
 
     if selected_slot:
         purpose = extracted_info.get("purpose", "meeting")
         title = f"Scheduled {purpose.title()}"
-        appointment = calendar.book_appointment(title, selected_slot["start"])
 
-        state["booking_confirmed"] = True
-        state["available_slots"] = []  # Reset slots after booking
-        state["selected_slot"] = None  # Clear selected slot
-        state["user_intent"] = ""  # Reset intent
+        try:
+            # Use the datetime object for booking
+            start_datetime = selected_slot.get("_datetime_start")
+            if not start_datetime:
+                # Fallback: parse from ISO string
+                start_datetime = datetime.fromisoformat(selected_slot["start"].replace("Z", "+00:00"))
 
-        response = f"✅ Booking confirmed! Your {purpose} is scheduled for {selected_slot['formatted']}. Appointment ID: {appointment['id']}"
+            appointment = calendar.book_appointment(title, start_datetime)
+
+            state["booking_confirmed"] = True
+            state["available_slots"] = []  # Reset slots after booking
+            state["selected_slot"] = None  # Clear selected slot
+            state["user_intent"] = ""  # Reset intent
+            state["conversation_phase"] = "booking_complete"  # Update phase
+
+            response = f"✅ Booking confirmed! Your {purpose} is scheduled for {selected_slot['formatted']}. Appointment ID: {appointment['id']}"
+            state["messages"].append(AIMessage(content=response))
+
+            print(f"DEBUG: Appointment booked successfully: {appointment}")
+
+        except Exception as e:
+            print(f"ERROR: Failed to book appointment: {str(e)}")
+            response = "❌ Sorry, there was an error booking your appointment. Please try again."
+            state["messages"].append(AIMessage(content=response))
+    else:
+        response = "❌ No slot selected. Please choose a slot first."
         state["messages"].append(AIMessage(content=response))
 
     return state
@@ -316,39 +356,38 @@ def generate_response(state: ConversationState) -> ConversationState:
     available_slots = state.get("available_slots", [])
     extracted_info = state.get("extracted_info", {})
     selected_slot = state.get("selected_slot")
+    conversation_phase = state.get("conversation_phase", "")
 
-    if intent == "book_appointment":
+    print(f"DEBUG: Generating response for intent: {intent}, phase: {conversation_phase}")
+    print(f"DEBUG: Available slots: {len(available_slots)}, Selected slot: {bool(selected_slot)}")
+
+    if intent == "book_appointment" or intent == "check_availability":
         if available_slots:
             response = "I found some available time slots for you:\n\n"
             for i, slot in enumerate(available_slots, 1):
                 response += f"{i}. {slot['formatted']}\n"
-            response += "\nPlease reply with the number of your preferred slot (e.g., '1' for the first slot)."
+            response += "\nPlease select a slot by clicking the button or typing the number (e.g., '1' for the first slot)."
+            # Don't change phase here - it's already set in check_availability
         else:
             response = "Let me check availability for you. Please specify your preferred date and time."
 
-    elif intent == "check_availability":
-        if available_slots:
-            response = "Here are the available time slots:\n\n"
-            for i, slot in enumerate(available_slots, 1):
-                response += f"{i}. {slot['formatted']}\n"
-            response += "\nWould you like to book any of these slots? Just reply with the number!"
-        else:
-            response = (
-                "Let me check what times are available. What date would you prefer?"
-            )
-
     elif intent == "select_slot":
         if selected_slot:
-            response = f"Great! You've selected: {selected_slot['formatted']}\n\nWould you like to confirm this booking? Reply with 'confirm' or 'yes'."
+            response = f"Perfect! You've selected: {selected_slot['formatted']}\n\nWould you like to confirm this booking? Click 'Confirm' or reply with 'yes'."
+            # Phase is already set to awaiting_confirmation in handle_slot_selection
         else:
             response = "I didn't find that slot. Please choose a number from the available options above."
 
     elif intent == "confirm_booking":
-        # This will be handled by confirm_booking function
-        return state
+        # This should be handled by confirm_booking function, but this is a fallback
+        if selected_slot:
+            response = "Processing your booking confirmation..."
+        else:
+            response = "Please select a time slot first before confirming."
 
-    else:
+    else:  # general_inquiry
         response = "Hello! I'm here to help you book appointments. You can say things like:\n- 'book meeting tomorrow'\n- 'check availability next week'\n- 'schedule call monday'"
+        state["conversation_phase"] = "initial"
 
     state["messages"].append(AIMessage(content=response))
     return state
@@ -370,23 +409,20 @@ def create_booking_workflow():
 
     def should_check_availability(state):
         intent = state["user_intent"]
+        print(f"DEBUG: Routing decision for intent: {intent}")
+
         if intent in ["book_appointment", "check_availability"]:
             return "check_availability"
         elif intent == "select_slot":
             return "handle_selection"
         elif intent == "confirm_booking":
-            return "confirm_booking"
+            # Check if we have a selected slot to confirm
+            if state.get("selected_slot"):
+                return "confirm_booking"
+            else:
+                return "respond"
         else:
             return "respond"
-
-    def after_availability_check(state):
-        return "respond"
-
-    def after_slot_selection(state):
-        return "respond"
-
-    def after_booking_confirmation(state):
-        return END
 
     # Add conditional edges
     workflow.add_conditional_edges("analyze", should_check_availability)
@@ -429,10 +465,13 @@ async def chat_endpoint(message: ChatMessage):
                 "available_slots": [],
                 "selected_slot": None,
                 "booking_confirmed": False,
+                "conversation_phase": "initial",
             }
 
         # Get current state
         state = conversations[message.conversation_id]
+
+        print(f"DEBUG: Processing message: '{message.message}' in phase: '{state.get('conversation_phase', 'unknown')}'")
 
         # Add user message to state
         state["messages"].append(HumanMessage(content=message.message))
@@ -450,15 +489,29 @@ async def chat_endpoint(message: ChatMessage):
             else "I'm ready to help you book an appointment!"
         )
 
+        # Prepare slots for response (ensure they're JSON serializable)
+        response_slots = []
+        for slot in result.get("available_slots", []):
+            clean_slot = {
+                "start": slot["start"],
+                "end": slot["end"],
+                "formatted": slot["formatted"]
+            }
+            response_slots.append(clean_slot)
+
+        print(f"DEBUG: Returning response with {len(response_slots)} slots, booking_confirmed: {result.get('booking_confirmed', False)}")
+
         return ChatResponse(
             response=ai_response,
-            available_slots=result.get("available_slots", []),
+            available_slots=response_slots,
             booking_confirmed=result.get("booking_confirmed", False),
             conversation_id=message.conversation_id,
         )
 
     except Exception as e:
-        print(f"Error in chat endpoint: {str(e)}")
+        print(f"ERROR in chat endpoint: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -496,6 +549,22 @@ async def cancel_appointment(appointment_id: str):
             }
 
     raise HTTPException(status_code=404, detail="Appointment not found")
+
+
+@app.get("/debug/conversations")
+async def debug_conversations():
+    """Debug endpoint to see conversation states"""
+    debug_data = {}
+    for conv_id, state in conversations.items():
+        debug_data[conv_id] = {
+            "phase": state.get("conversation_phase", "unknown"),
+            "intent": state.get("user_intent", ""),
+            "available_slots_count": len(state.get("available_slots", [])),
+            "has_selected_slot": bool(state.get("selected_slot")),
+            "booking_confirmed": state.get("booking_confirmed", False),
+            "message_count": len(state.get("messages", []))
+        }
+    return debug_data
 
 
 if __name__ == "__main__":
