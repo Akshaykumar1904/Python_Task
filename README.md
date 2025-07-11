@@ -28,7 +28,7 @@ An intelligent appointment booking assistant powered by **FastAPI**, **LangGraph
 ## 📁 Project Structure
 
 ```
-📦python/task/
+📦python/
 ├── backend.py     # FastAPI + LangGraph booking logic
 ├── frontend.py    # Streamlit UI for chat and slots
 ├── .gitignore
